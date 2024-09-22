@@ -65,22 +65,31 @@ bool obs_module_load(void)
     multistream_dock = new MultistreamDock(main_window);
     obs_frontend_add_dock_by_id("AitumMultistreamDock", obs_module_text("AitumMultistream"), multistream_dock);
 
-    // Register the WebSocket vendor
-    multistream_dock->websocket_vendor = obs_websocket_register_vendor("aitum_multistream");
-    if (!multistream_dock->websocket_vendor) {
-        blog(LOG_ERROR, "[Aitum-Multistream] Failed to register WebSocket vendor.");
-        return false;
-    }
-    
-    // Register WebSocket commands
-    multistream_dock->register_websocket_procedures();
-
     return true;
 }
 
 
+
 void obs_module_post_load()
 {
+	// Now it's safe to interact with obs-websocket
+    unsigned int api_version = obs_websocket_get_api_version();
+    if (api_version == 0) {
+        blog(LOG_ERROR, "[Aitum-Multistream] Failed to retrieve WebSocket API version or API version is 0.");
+        return;
+    }
+    blog(LOG_INFO, "[Aitum-Multistream] WebSocket API version: %u", api_version);
+
+    // Register the WebSocket vendor
+    multistream_dock->websocket_vendor = obs_websocket_register_vendor("aitum_multistream");
+    if (!multistream_dock->websocket_vendor) {
+        blog(LOG_ERROR, "[Aitum-Multistream] Failed to register WebSocket vendor.");
+        return;
+    }
+
+    // Register WebSocket commands
+    multistream_dock->register_websocket_procedures();
+
 	if (multistream_dock)
 		multistream_dock->LoadVerticalOutputs(true);
 }
@@ -1166,145 +1175,207 @@ void MultistreamDock::storeMainStreamEncoders()
 }
 
 
-bool MultistreamDock::update_stream_key_by_index(int index, const QString &new_stream_key) {
-    // Ensure the index is valid
-    if (index < 0 || index >= outputs.size()) {
-        blog(LOG_ERROR, "[Aitum-Multistream] Invalid index %d for updating stream key.", index);
-        return false; // Return false since the index is invalid
-    }
-
-    // Retrieve the output by index
-    auto &output_tuple = outputs[index];
-    obs_output_t *output = std::get<obs_output_t *>(output_tuple);
-
-    // If output is null, return false
-    if (!output) {
-        blog(LOG_ERROR, "[Aitum-Multistream] Output at index %d is null.", index);
+bool MultistreamDock::update_stream_settings_by_index(int index, const QString &new_stream_key, const QString &new_stream_server) {
+    // Check if vertical outputs are available
+    if (!vertical_outputs) {
+        blog(LOG_ERROR, "[Aitum-Multistream] No vertical outputs available.");
         return false;
     }
 
-    // Get the service associated with the output
+    // Get the count of vertical outputs
+    size_t vertical_output_count = obs_data_array_count(vertical_outputs);
+    if (index < 0 || index >= (int)vertical_output_count) {
+        blog(LOG_ERROR, "[Aitum-Multistream] Invalid index %d for updating stream settings.", index);
+        return false;
+    }
+
+    // Retrieve the output data by index
+    obs_data_t *output_data = obs_data_array_item(vertical_outputs, index);
+    if (!output_data) {
+        blog(LOG_ERROR, "[Aitum-Multistream] Failed to get output data for index %d.", index);
+        return false;
+    }
+
+    // Get the output name
+    const char *output_name = obs_data_get_string(output_data, "name");
+
+    // Retrieve the output via procedure handler
+    auto ph = obs_get_proc_handler();
+    struct calldata cd;
+    calldata_init(&cd);
+    calldata_set_string(&cd, "name", output_name);
+    obs_output_t *output = nullptr;
+    if (proc_handler_call(ph, "aitum_vertical_get_stream_output", &cd)) {
+        output = (obs_output_t *)calldata_ptr(&cd, "output");
+    }
+    calldata_free(&cd);
+    obs_data_release(output_data);
+
+    if (!output) {
+        blog(LOG_ERROR, "[Aitum-Multistream] Output '%s' not found.", output_name);
+        return false;
+    }
+
+    // Proceed to update the stream settings of the output
     obs_service_t *service = obs_output_get_service(output);
     if (!service) {
-        blog(LOG_ERROR, "[Aitum-Multistream] Service for output at index %d is null.", index);
+        blog(LOG_ERROR, "[Aitum-Multistream] Service for output '%s' is null.", output_name);
+        obs_output_release(output);
         return false;
     }
 
-    // Retrieve service settings
     obs_data_t *service_settings = obs_service_get_settings(service);
     if (!service_settings) {
-        blog(LOG_ERROR, "[Aitum-Multistream] Failed to get service settings for output at index %d.", index);
+        blog(LOG_ERROR, "[Aitum-Multistream] Failed to get service settings for output '%s'.", output_name);
+        obs_service_release(service);
+        obs_output_release(output);
         return false;
     }
 
-    // Check the service type and update the stream key accordingly
-    const char *service_type = obs_service_get_type(service);
-    if (strcmp(service_type, "rtmp_common") == 0 || strcmp(service_type, "whip_custom") == 0) {
-        obs_data_set_string(service_settings, "key", new_stream_key.toUtf8().constData());
-    } else {
-        blog(LOG_WARNING, "[Aitum-Multistream] Unsupported service type '%s' for stream key update.", service_type);
-        obs_data_release(service_settings);
-        return false;
-    }
+    // Update the stream key and server
+    obs_data_set_string(service_settings, "key", new_stream_key.toUtf8().constData());
+    obs_data_set_string(service_settings, "server", new_stream_server.toUtf8().constData());
 
     // Apply the updated settings to the service
-    obs_service_update(service, service_settings); // No assignment to a boolean since it's void
-    obs_data_release(service_settings); // Always release the settings after use
+    obs_service_update(service, service_settings);
+    obs_data_release(service_settings);
+    obs_service_release(service);
 
     // Restart the output if it is active
     if (obs_output_active(output)) {
-        obs_output_stop(output); // Stop the output (no bool required)
-        obs_output_start(output); // Start it again with new settings (no bool required)
+        obs_output_stop(output);
+        obs_output_start(output);
     }
 
-    return true; // Indicating the stream key update was successful
+    obs_output_release(output);
+    return true;
 }
+
 
 
 
 bool MultistreamDock::start_stream_by_index(int index) {
-    // Ensure the index is valid
-    if (index < 0 || index >= outputs.size()) {
-        blog(LOG_ERROR, "[Aitum-Multistream] Invalid index %d for starting stream.", index);
-        return false; // Invalid index
-    }
-
-    // Retrieve the output by index
-    obs_output_t *output = std::get<obs_output_t *>(outputs[index]);
-
-    // Check if output is null
-    if (!output) {
-        blog(LOG_ERROR, "[Aitum-Multistream] Output at index %d is null.", index);
+    // Check if vertical outputs are available
+    if (!vertical_outputs) {
+        blog(LOG_ERROR, "[Aitum-Multistream] No vertical outputs available.");
         return false;
     }
 
-    // Check if the stream is already active
-    if (obs_output_active(output)) {
-        blog(LOG_INFO, "[Aitum-Multistream] Stream at index %d is already active.", index);
-        return false; // Stream is already active, no need to start
+    // Get the count of vertical outputs
+    size_t vertical_output_count = obs_data_array_count(vertical_outputs);
+    if (index < 0 || index >= (int)vertical_output_count) {
+        blog(LOG_ERROR, "[Aitum-Multistream] Invalid index %d for starting stream.", index);
+        return false;
     }
 
-    // Start the output (stream) - no return value from obs_output_start, so no need for bool checking
-    obs_output_start(output);
-    
-    // Optionally, you could add a delay or check after calling start to ensure the stream is indeed started
-    if (obs_output_active(output)) {
-        blog(LOG_INFO, "[Aitum-Multistream] Stream at index %d successfully started.", index);
-        return true; // Stream was started successfully
-    } else {
-        blog(LOG_ERROR, "[Aitum-Multistream] Stream at index %d failed to start.", index);
-        return false; // Failed to start the stream
+    // Retrieve the output data by index
+    obs_data_t *output_data = obs_data_array_item(vertical_outputs, index);
+    if (!output_data) {
+        blog(LOG_ERROR, "[Aitum-Multistream] Failed to get output data for index %d.", index);
+        return false;
     }
+
+    // Get the output name
+    const char *output_name = obs_data_get_string(output_data, "name");
+
+    // Retrieve the output via procedure handler
+    auto ph = obs_get_proc_handler();
+    struct calldata cd;
+    calldata_init(&cd);
+    calldata_set_string(&cd, "name", output_name);
+    obs_output_t *output = nullptr;
+    if (proc_handler_call(ph, "aitum_vertical_get_stream_output", &cd)) {
+        output = (obs_output_t *)calldata_ptr(&cd, "output");
+    }
+    calldata_free(&cd);
+    obs_data_release(output_data);
+
+    if (!output) {
+        blog(LOG_ERROR, "[Aitum-Multistream] Output '%s' not found.", output_name);
+        return false;
+    }
+
+    if (obs_output_active(output)) {
+        blog(LOG_INFO, "[Aitum-Multistream] Stream '%s' is already active.", output_name);
+        obs_output_release(output);
+        return false;
+    }
+
+    // Start the output (stream)
+    obs_output_start(output);
+    obs_output_release(output);
+
+    return true;
 }
+
 
 
 bool MultistreamDock::stop_stream_by_index(int index) {
-    // Ensure the index is valid
-    if (index < 0 || index >= outputs.size()) {
-        blog(LOG_ERROR, "[Aitum-Multistream] Invalid index %d for stopping stream.", index);
-        return false; // Invalid index
-    }
-
-    // Retrieve the output by index
-    obs_output_t *output = std::get<obs_output_t *>(outputs[index]);
-
-    // Check if output is null
-    if (!output) {
-        blog(LOG_ERROR, "[Aitum-Multistream] Output at index %d is null.", index);
+    // Check if vertical outputs are available
+    if (!vertical_outputs) {
+        blog(LOG_ERROR, "[Aitum-Multistream] No vertical outputs available.");
         return false;
     }
 
-    // Check if the stream is already inactive
-    if (!obs_output_active(output)) {
-        blog(LOG_INFO, "[Aitum-Multistream] Stream at index %d is already inactive.", index);
-        return false; // Stream is already inactive, no need to stop
+    // Get the count of vertical outputs
+    size_t vertical_output_count = obs_data_array_count(vertical_outputs);
+    if (index < 0 || index >= (int)vertical_output_count) {
+        blog(LOG_ERROR, "[Aitum-Multistream] Invalid index %d for stopping stream.", index);
+        return false;
     }
 
-    // Stop the output (stream) - no return value from obs_output_stop, so no need for bool checking
-    obs_output_stop(output);
-    
-    // Optionally, you could add a delay or check after calling stop to ensure the stream is indeed stopped
-    if (!obs_output_active(output)) {
-        blog(LOG_INFO, "[Aitum-Multistream] Stream at index %d successfully stopped.", index);
-        return true; // Stream was stopped successfully
-    } else {
-        blog(LOG_ERROR, "[Aitum-Multistream] Stream at index %d failed to stop.", index);
-        return false; // Failed to stop the stream
+    // Retrieve the output data by index
+    obs_data_t *output_data = obs_data_array_item(vertical_outputs, index);
+    if (!output_data) {
+        blog(LOG_ERROR, "[Aitum-Multistream] Failed to get output data for index %d.", index);
+        return false;
     }
+
+    // Get the output name
+    const char *output_name = obs_data_get_string(output_data, "name");
+
+    // Retrieve the output via procedure handler
+    auto ph = obs_get_proc_handler();
+    struct calldata cd;
+    calldata_init(&cd);
+    calldata_set_string(&cd, "name", output_name);
+    obs_output_t *output = nullptr;
+    if (proc_handler_call(ph, "aitum_vertical_get_stream_output", &cd)) {
+        output = (obs_output_t *)calldata_ptr(&cd, "output");
+    }
+    calldata_free(&cd);
+    obs_data_release(output_data);
+
+    if (!output) {
+        blog(LOG_ERROR, "[Aitum-Multistream] Output '%s' not found.", output_name);
+        return false;
+    }
+
+    if (!obs_output_active(output)) {
+        blog(LOG_INFO, "[Aitum-Multistream] Stream '%s' is already inactive.", output_name);
+        obs_output_release(output);
+        return false;
+    }
+
+    // Stop the output (stream)
+    obs_output_stop(output);
+    obs_output_release(output);
+
+    return true;
 }
 
 
-void MultistreamDock::update_stream_key_websocket(obs_data_t *request, obs_data_t *response, void *priv_data)
+
+void MultistreamDock::update_stream_settings_websocket(obs_data_t *request, obs_data_t *response, void *priv_data)
 {
     // Extract index from WebSocket request
     int index = obs_data_get_int(request, "index");
-
-    // Extract the new stream key from WebSocket request
     const char *new_stream_key = obs_data_get_string(request, "new_stream_key");
+    const char *new_stream_server = obs_data_get_string(request, "new_stream_server");
 
     // Validate the input parameters
-    if (index < 0 || !new_stream_key) {
-        blog(LOG_ERROR, "[Aitum-Multistream] Invalid index or stream key received from WebSocket.");
+    if (index < 0 || !new_stream_key || !new_stream_server) {
+        blog(LOG_ERROR, "[Aitum-Multistream] Invalid parameters received from WebSocket.");
 
         // Respond with error in the response object
         obs_data_set_int(response, "status", 400);  // Bad Request
@@ -1312,24 +1383,26 @@ void MultistreamDock::update_stream_key_websocket(obs_data_t *request, obs_data_
         return;
     }
 
-    // Call the existing function to update the stream key
-    bool success = multistream_dock->update_stream_key_by_index(index, QString::fromUtf8(new_stream_key));
+    // Call the function to update the stream settings by index
+    bool success = multistream_dock->update_stream_settings_by_index(
+        index, QString::fromUtf8(new_stream_key), QString::fromUtf8(new_stream_server));
 
     // Respond with success or error based on the result
     if (success) {
-        blog(LOG_INFO, "[Aitum-Multistream] Successfully updated stream key for index %d.", index);
+        blog(LOG_INFO, "[Aitum-Multistream] Successfully updated stream settings for index %d.", index);
 
         // Success response
         obs_data_set_int(response, "status", 200);  // OK
-        obs_data_set_string(response, "message", "Stream key updated successfully");
+        obs_data_set_string(response, "message", "Stream settings updated successfully");
     } else {
-        blog(LOG_ERROR, "[Aitum-Multistream] Failed to update stream key for index %d.", index);
+        blog(LOG_ERROR, "[Aitum-Multistream] Failed to update stream settings for index %d.", index);
 
         // Error response
         obs_data_set_int(response, "status", 500);  // Internal Server Error
-        obs_data_set_string(response, "error", "Failed to update stream key");
+        obs_data_set_string(response, "error", "Failed to update stream settings");
     }
 }
+
 
 void MultistreamDock::start_stream_websocket(obs_data_t *request, obs_data_t *response, void *priv_data)
 {
@@ -1409,8 +1482,8 @@ void MultistreamDock::register_websocket_procedures()
     }
 
     // Register the WebSocket commands (procedures)
-    obs_websocket_vendor_register_request(websocket_vendor, "update_stream_key",
-        &MultistreamDock::update_stream_key_websocket, nullptr);
+    obs_websocket_vendor_register_request(websocket_vendor, "update_stream_settings",
+        &MultistreamDock::update_stream_settings_websocket, nullptr);
 
     obs_websocket_vendor_register_request(websocket_vendor, "start_stream",
         &MultistreamDock::start_stream_websocket, nullptr);
@@ -1418,4 +1491,5 @@ void MultistreamDock::register_websocket_procedures()
     obs_websocket_vendor_register_request(websocket_vendor, "stop_stream",
         &MultistreamDock::stop_stream_websocket, nullptr);
 }
+
 

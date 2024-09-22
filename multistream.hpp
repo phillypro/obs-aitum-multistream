@@ -71,11 +71,11 @@ public:
 	MultistreamDock(QWidget *parent = nullptr);
 	~MultistreamDock();
 	void LoadVerticalOutputs(bool firstLoad = true);
-	bool update_stream_key_by_index(int index, const QString &new_stream_key);
+	bool update_stream_settings_by_index(int index, const QString &new_stream_key, const QString &new_stream_server);
 	bool start_stream_by_index(int index); // Start a stream based on index
 	bool stop_stream_by_index(int index);  // Stop a stream based on index
 
-	static void update_stream_key_websocket(obs_data_t *request, obs_data_t *response, void *priv_data);
+    static void update_stream_settings_websocket(obs_data_t *request, obs_data_t *response, void *priv_data);
 	static void start_stream_websocket(obs_data_t *request, obs_data_t *response, void *priv_data); // Start stream
     static void stop_stream_websocket(obs_data_t *request, obs_data_t *response, void *priv_data);  // Stop stream
 };
