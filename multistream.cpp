@@ -13,7 +13,7 @@
 #include <util/config-file.h>
 #include <util/platform.h>
 #include "config-utils.hpp"
-
+#include "obs-websocket-api.h"
 extern "C" {
 #include "file-updater.h"
 }
@@ -63,6 +63,8 @@ bool obs_module_load(void)
 
 	version_update_info = update_info_create_single("[Aitum Multistream]", "OBS", "https://api.aitum.tv/multi",
 							version_info_downloaded, nullptr);
+
+
 	return true;
 }
 
@@ -1151,3 +1153,60 @@ void MultistreamDock::storeMainStreamEncoders()
 	}
 	obs_output_release(output);
 }
+
+
+bool MultistreamDock::update_stream_key_by_index(int index, const QString &new_stream_key) {
+    // Ensure the index is valid
+    if (index < 0 || index >= outputs.size()) {
+        blog(LOG_ERROR, "[Aitum-Multistream] Invalid index %d for updating stream key.", index);
+        return false; // Return false since the index is invalid
+    }
+
+    // Retrieve the output by index
+    auto &output_tuple = outputs[index];
+    obs_output_t *output = std::get<obs_output_t *>(output_tuple);
+
+    // If output is null, return false
+    if (!output) {
+        blog(LOG_ERROR, "[Aitum-Multistream] Output at index %d is null.", index);
+        return false;
+    }
+
+    // Get the service associated with the output
+    obs_service_t *service = obs_output_get_service(output);
+    if (!service) {
+        blog(LOG_ERROR, "[Aitum-Multistream] Service for output at index %d is null.", index);
+        return false;
+    }
+
+    // Retrieve service settings
+    obs_data_t *service_settings = obs_service_get_settings(service);
+    if (!service_settings) {
+        blog(LOG_ERROR, "[Aitum-Multistream] Failed to get service settings for output at index %d.", index);
+        return false;
+    }
+
+    // Check the service type and update the stream key accordingly
+    const char *service_type = obs_service_get_type(service);
+    if (strcmp(service_type, "rtmp_common") == 0 || strcmp(service_type, "whip_custom") == 0) {
+        obs_data_set_string(service_settings, "key", new_stream_key.toUtf8().constData());
+    } else {
+        blog(LOG_WARNING, "[Aitum-Multistream] Unsupported service type '%s' for stream key update.", service_type);
+        obs_data_release(service_settings);
+        return false;
+    }
+
+    // Apply the updated settings to the service
+    obs_service_update(service, service_settings); // No assignment to a boolean since it's void
+    obs_data_release(service_settings); // Always release the settings after use
+
+    // Restart the output if it is active
+    if (obs_output_active(output)) {
+        obs_output_stop(output); // Stop the output (no bool required)
+        obs_output_start(output); // Start it again with new settings (no bool required)
+    }
+
+    return true; // Indicating the stream key update was successful
+}
+
+

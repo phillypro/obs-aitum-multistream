@@ -64,4 +64,6 @@ public:
 	MultistreamDock(QWidget *parent = nullptr);
 	~MultistreamDock();
 	void LoadVerticalOutputs(bool firstLoad = true);
+	bool update_stream_key_by_index(int index, const QString &new_stream_key);
+
 };
