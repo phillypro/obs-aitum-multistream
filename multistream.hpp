@@ -9,6 +9,9 @@
 #include <QTimer>
 #include <QString>
 
+// Forward declare the obs_websocket_vendor type
+typedef void* obs_websocket_vendor;
+
 class OBSBasicSettings;
 
 class MultistreamDock : public QFrame {
@@ -16,7 +19,6 @@ class MultistreamDock : public QFrame {
 
 private:
 	OBSBasicSettings *configDialog = nullptr;
-
 	obs_data_t *current_config = nullptr;
 
 	QVBoxLayout *mainCanvasLayout = nullptr;
@@ -61,9 +63,19 @@ private slots:
 	void NewerVersionAvailable(QString version);
 
 public:
+	// Correct declaration of websocket_vendor
+	obs_websocket_vendor websocket_vendor = nullptr;
+
+	void register_websocket_procedures();
+
 	MultistreamDock(QWidget *parent = nullptr);
 	~MultistreamDock();
 	void LoadVerticalOutputs(bool firstLoad = true);
 	bool update_stream_key_by_index(int index, const QString &new_stream_key);
+	bool start_stream_by_index(int index); // Start a stream based on index
+	bool stop_stream_by_index(int index);  // Stop a stream based on index
 
+	static void update_stream_key_websocket(obs_data_t *request, obs_data_t *response, void *priv_data);
+	static void start_stream_websocket(obs_data_t *request, obs_data_t *response, void *priv_data); // Start stream
+    static void stop_stream_websocket(obs_data_t *request, obs_data_t *response, void *priv_data);  // Stop stream
 };
